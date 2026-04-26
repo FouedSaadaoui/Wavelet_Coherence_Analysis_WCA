@@ -1,0 +1,139 @@
+# ============================================================
+# Wavelet Coherence Analysis
+# ============================================================
+
+!pip install pycwt openpyxl -q
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import pycwt as wavelet
+from google.colab import files
+import io
+import warnings
+
+# ------------------------------------------------------------
+# 1. Upload Excel file
+# ------------------------------------------------------------
+print("Upload your Excel file (first column should be dates):")
+uploaded = files.upload()
+filename = list(uploaded.keys())[0]
+
+df = pd.read_excel(io.BytesIO(uploaded[filename]), sheet_name=0)
+
+# ------------------------------------------------------------
+# 2. Identify date column (first column or any column with 'date' in name)
+# ------------------------------------------------------------
+possible_date_cols = [col for col in df.columns if 'date' in col.lower()]
+if len(possible_date_cols) > 0:
+    date_col = possible_date_cols[0]
+else:
+    date_col = df.columns[0]   # assume first column is date
+
+df[date_col] = pd.to_datetime(df[date_col])
+df.set_index(date_col, inplace=True)
+
+# Keep only numeric columns (drop any non‑numeric)
+numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+print("\nAvailable numeric columns:")
+for i, col in enumerate(numeric_cols):
+    print(f"  {i+1}. {col}")
+
+if len(numeric_cols) < 2:
+    raise ValueError("Need at least two numeric columns for coherence analysis.")
+
+# ------------------------------------------------------------
+# 3. Select reference and target columns
+# ------------------------------------------------------------
+print("\nSelect the REFERENCE column (e.g., the one you want to compare against):")
+ref_idx = int(input("Enter column number: ")) - 1
+reference = numeric_cols[ref_idx]
+
+print(f"\nReference column selected: {reference}")
+print("\nSelect TARGET column(s) (comma‑separated numbers, or 'all' for all remaining):")
+target_input = input("Enter numbers or 'all': ")
+
+if target_input.lower() == 'all':
+    targets = [col for col in numeric_cols if col != reference]
+else:
+    target_indices = [int(x.strip()) - 1 for x in target_input.split(',')]
+    targets = [numeric_cols[i] for i in target_indices if numeric_cols[i] != reference]
+
+if not targets:
+    raise ValueError("No target columns selected.")
+
+print(f"\nWill compute coherence for: {reference} vs {targets}")
+
+# ------------------------------------------------------------
+# 4. Function to compute and plot coherence for a pair
+# ------------------------------------------------------------
+def plot_coherence(df, col1, col2, max_period=256):
+    # Prepare log returns
+    prices = df[[col1, col2]].dropna()
+    if len(prices) < 5:
+        print(f"Not enough data after dropping NaNs for {col1} vs {col2}. Skipping.")
+        return
+    logret1 = np.log(prices[col1] / prices[col1].shift(1))
+    logret2 = np.log(prices[col2] / prices[col2].shift(1))
+    data = pd.DataFrame({col1: logret1, col2: logret2}).dropna()
+    
+    if len(data) < 10:
+        print(f"Not enough return data for {col1} vs {col2}. Skipping.")
+        return
+    
+    us = data[col1].values
+    other = data[col2].values
+    time = (data.index - data.index[0]).days.values
+    dt = 1
+    
+    # Wavelet parameters (fast)
+    dj = 1/6
+    s0 = 2 * dt
+    J = int(np.log2(max_period / s0) / dj)
+    J = min(J, int(np.log2(len(time) * dt / s0) / dj))
+    
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        coherence, _, coi, freq, significance = wavelet.wct(
+            us, other, dt=dt, dj=dj, s0=s0, J=J,
+            significance_level=0.95, normalize=True
+        )
+    periods = 1 / freq
+    
+    # Plot
+    fig, ax = plt.subplots(figsize=(12, 6))
+    X, Y = np.meshgrid(time, periods)
+    cf = ax.contourf(X, Y, coherence, levels=np.linspace(0, 1, 50), cmap='jet')
+    plt.colorbar(cf, ax=ax, label='Coherence')
+    
+    # Cone of influence
+    ax.fill_between(time, coi, periods[-1], color='white', alpha=0.4)
+    ax.plot(time, coi, 'k--', linewidth=0.8)
+    
+    # Significance contours
+    if significance is not None and significance.ndim == 2:
+        sig_mask = coherence > significance
+        ax.contour(X, Y, sig_mask, levels=[0.5], colors='white', linewidths=0.5, linestyles='-')
+    
+    ax.set_yscale('log')
+    ax.set_ylim(periods[0], periods[-1])
+    ax.set_ylabel('Period (days)')
+    ax.set_xlabel('Time (days from start)')
+    ax.set_title(f'Wavelet Coherence: {col1} vs {col2} (log returns)')
+    
+    # Date labels
+    tick_days = np.linspace(0, time[-1], 6)
+    tick_labels = [data.index[0] + pd.Timedelta(days=int(d)) for d in tick_days]
+    ax.set_xticks(tick_days)
+    ax.set_xticklabels([t.strftime('%Y-%m-%d') for t in tick_labels], rotation=45)
+    
+    plt.tight_layout()
+    plt.show()
+    print(f"Average coherence: {np.mean(coherence):.3f}\n")
+
+# ------------------------------------------------------------
+# 5. Run for each target
+# ------------------------------------------------------------
+for target in targets:
+    print(f"\n--- Processing {reference} vs {target} ---")
+    plot_coherence(df, reference, target)
